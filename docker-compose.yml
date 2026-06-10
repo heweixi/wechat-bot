@@ -1,0 +1,49 @@
+# ──────────────────────────────────────────────
+# 微信机器人 — Docker Compose
+# 启动：docker-compose up -d --build
+# 停止：docker-compose down
+# 日志：docker-compose logs -f
+# ──────────────────────────────────────────────
+
+services:
+
+  # ── 后端：FastAPI + AI + 微信桥接 ──
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # 持久化数据库和日志
+      - wechat_data:/app/data
+      # 配置文件注入
+      - ./.env:/app/.env:ro
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///app/data/wechat_bot.db
+    restart: unless-stopped
+    networks:
+      - wechat_net
+
+  # ── 前端：Vue 3 SPA + Nginx 反向代理 ──
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - wechat_net
+
+volumes:
+  wechat_data:
+    driver: local
+
+networks:
+  wechat_net:
+    driver: bridge
