@@ -1,0 +1,138 @@
+# ──────────────────────────────────────────────────────
+# WeChat Bot — GitHub Actions CI/CD
+#
+# 触发条件: push 到 main 分支
+# 前置条件: 在 GitHub Secrets 中设置以下变量
+#
+#   必需:
+#     SSH_HOST         远程服务器 IP 或域名
+#     SSH_USER         远程服务器 SSH 用户名
+#     SSH_PRIVATE_KEY  SSH 私钥（ed25519/rsa）
+#     ENV_FILE         完整 .env 文件内容（含 API Key）
+#
+#   可选:
+#     SSH_PORT         默认 22
+#     DEPLOY_PATH      远程部署路径，默认 /home/{user}/wechat-bot
+# ──────────────────────────────────────────────────────
+
+name: Deploy WeChat Bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  # ── 阶段一：构建前端 ────────────────────────────
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ./frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: ./frontend
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 1
+
+  # ── 阶段二：部署到远程服务器 ────────────────────
+  deploy:
+    name: Deploy to Remote Server
+    needs: build-frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download built frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+
+      - name: Set deploy path
+        id: path
+        run: |
+          if [ -n "${{ secrets.DEPLOY_PATH }}" ]; then
+            echo "deploy_path=${{ secrets.DEPLOY_PATH }}" >> $GITHUB_OUTPUT
+          else
+            echo "deploy_path=/home/${{ secrets.SSH_USER }}/wechat-bot" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare deployment archive
+        run: |
+          mkdir -p _deploy
+          rsync -av --exclude='node_modules' \
+                --exclude='__pycache__' \
+                --exclude='*.pyc' \
+                --exclude='*.db' \
+                --exclude='.git' \
+                --exclude='.venv' \
+                --exclude='venv' \
+                --exclude='data/' \
+                --exclude='.env' \
+                ./ _deploy/
+          echo "${{ secrets.ENV_FILE }}" > _deploy/.env
+          echo "部署包准备完毕"
+
+      - name: Deploy via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT || '22' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "_deploy/*"
+          target: "${{ steps.path.outputs.deploy_path }}"
+          strip_components: 1
+
+      - name: Restart services on remote
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT || '22' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ${{ steps.path.outputs.deploy_path }}
+
+            echo "=== 确保 .env 权限正确 ==="
+            chmod 600 .env
+
+            echo "=== 重建并启动容器 ==="
+            sudo docker compose up -d --build
+
+            echo "=== 等待服务就绪(5s) ==="
+            sleep 5
+
+            echo "=== 验证后端 ==="
+            curl -s http://localhost:8000/api/status
+            echo ""
+
+            echo "=== 验证前端 ==="
+            curl -s -o /dev/null -w "前端 HTTP %{http_code}\n" http://localhost:3000
+
+            echo "=== 清理旧镜像 ==="
+            sudo docker image prune -f
+
+            echo "=== ✅ 部署完成 ==="
