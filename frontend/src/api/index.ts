@@ -28,3 +28,9 @@ export const conversationApi = {
   searchMessages: (params: any) =>
     http.get('/conversations/search/messages', { params }).then(r => r.data),
 }
+
+// ── WeChat ──
+export const wechatApi = {
+  status: () => http.get('/wechat/status').then(r => r.data),
+  qrcodeUrl: () => `/api/wechat/qrcode?t=${Date.now()}`,
+}

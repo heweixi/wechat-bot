@@ -2,19 +2,22 @@
 #
 # 依赖：pip install itchat-uos
 # 注意：非官方 API，有被封号风险。
+# 支持：自动重连 / QR 码保存供 Web 显示 / 线程安全
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import queue
+import os
 import threading
+import time
+from pathlib import Path
 from typing import Optional
 
+from config import settings
 from wechat.bridge import ContactInfo, WeChatBridge, WeChatMessage
 
 logger = logging.getLogger(__name__)
-
 
 try:
     import itchat
@@ -27,26 +30,42 @@ class ItChatBridge(WeChatBridge):
 
     def __init__(self):
         self._logged_in = False
-        self._msg_queue: queue.Queue = queue.Queue()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._login_thread: Optional[threading.Thread] = None
+        self._qrcode_path: str = str(Path(settings.DATA_DIR) / "qrcode.png")
+        self._qrcode_updated_at: float = 0.0
+        self._stop_event = threading.Event()
 
     # ── 登录 / 登出 ──
 
     async def login(self) -> bool:
         if itchat is None:
-            logger.error("itchat-uos 未安装，无法登录微信。pip install itchat-uos")
+            logger.error("itchat-uos 未安装。运行: pip install itchat-uos")
             return False
 
-        loop = asyncio.get_running_loop()
-        self._loop = loop
+        self._loop = asyncio.get_running_loop()
+        self._stop_event.clear()
 
-        def _login():
-            itchat.auto_login(
-                hotReload=True,
-                enableCmdQR=2,
-                picDir="./data/qrcode.png",
-            )
-            loop.call_soon_threadsafe(setattr, self, "_logged_in", True)
+        def _login_worker():
+            """在独立线程中运行 itchat（阻塞式）"""
+            try:
+                itchat.auto_login(
+                    hotReload=True,
+                    enableCmdQR=2,
+                    picDir=self._qrcode_path,
+                    # 退出回调 — 触发重连
+                    exitCallback=lambda: self._loop.call_soon_threadsafe(
+                        self._on_disconnected
+                    ),
+                )
+            except Exception:
+                logger.exception("itchat 登录异常")
+                self._loop.call_soon_threadsafe(setattr, self, "_logged_in", False)
+                return
+
+            self._loop.call_soon_threadsafe(setattr, self, "_logged_in", True)
+            logger.info("微信登录成功")
+
             # 注册消息回调
             itchat.msg_register(itchat.content.TEXT, isFriendChat=True)(
                 lambda msg: self._on_itchat_msg(msg, is_group=False)
@@ -54,19 +73,88 @@ class ItChatBridge(WeChatBridge):
             itchat.msg_register(itchat.content.TEXT, isGroupChat=True)(
                 lambda msg: self._on_itchat_msg(msg, is_group=True)
             )
-            # 好友申请
+            itchat.msg_register(itchat.content.PICTURE, isFriendChat=True)(
+                lambda msg: self._on_itchat_msg(msg, is_group=False)
+            )
             itchat.msg_register(itchat.content.FRIENDS)(
                 self._on_itchat_friend_request
             )
-            logger.info("微信登录成功")
 
-        await asyncio.get_running_loop().run_in_executor(None, _login)
-        return self._logged_in
+            # 核心：必须调用 configured_reply() 才能处理消息
+            # itchat 会在内部循环等待消息，阻塞当前线程
+            try:
+                itchat.configured_reply()
+            except Exception:
+                logger.exception("itchat 消息循环异常")
+            finally:
+                self._loop.call_soon_threadsafe(setattr, self, "_logged_in", False)
+
+        self._login_thread = threading.Thread(
+            target=_login_worker, daemon=True, name="itchat-login"
+        )
+        self._login_thread.start()
+
+        # 等待一小段时间确认登录是否启动
+        await asyncio.sleep(1)
+        return True  # 登录在后台进行，调用方通过 is_logged_in 或 API 查询
+
+    def _on_disconnected(self):
+        """微信断开连接时的处理"""
+        self._logged_in = False
+        logger.warning("微信连接已断开")
+        # 启动自动重连（延迟 5 秒）
+        if not self._stop_event.is_set():
+            logger.info("5 秒后尝试自动重连...")
+            threading.Timer(5.0, self._auto_reconnect).start()
+
+    def _auto_reconnect(self):
+        """自动重连"""
+        if self._stop_event.is_set() or self._logged_in:
+            return
+        logger.info("尝试自动重连微信...")
+        try:
+            self._login_worker_internal()
+        except Exception:
+            logger.exception("自动重连失败，30 秒后再试")
+            if not self._stop_event.is_set():
+                threading.Timer(30.0, self._auto_reconnect).start()
+
+    def _login_worker_internal(self):
+        """内部登录（供重连使用）"""
+        itchat.auto_login(
+            hotReload=True,
+            enableCmdQR=2,
+            picDir=self._qrcode_path,
+            exitCallback=lambda: self._loop.call_soon_threadsafe(
+                self._on_disconnected
+            ),
+        )
+        self._loop.call_soon_threadsafe(setattr, self, "_logged_in", True)
+        logger.info("微信重连成功")
 
     async def logout(self):
+        self._stop_event.set()
         if itchat and self._logged_in:
-            itchat.logout()
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, itchat.logout)
+            except Exception:
+                pass
         self._logged_in = False
+        logger.info("微信已登出")
+
+    # ── QR 码 ──
+
+    def get_qrcode_path(self) -> Optional[str]:
+        """获取当前 QR 码图片路径（供 Web API 使用）"""
+        if os.path.exists(self._qrcode_path):
+            return self._qrcode_path
+        return None
+
+    def get_qrcode_age(self) -> float:
+        """QR 码图片的生成时间（秒），用于前端判断是否过期"""
+        if os.path.exists(self._qrcode_path):
+            return time.time() - os.path.getmtime(self._qrcode_path)
+        return -1
 
     # ── 发送 ──
 
@@ -75,39 +163,52 @@ class ItChatBridge(WeChatBridge):
             return False
 
         def _send():
-            itchat.send(content, toUserName=to_wx)
+            try:
+                # itchat 的 send 可能因为登录态失效而失败
+                itchat.send(content, toUserName=to_wx)
+                return True
+            except Exception:
+                logger.exception(f"发送消息失败到 {to_wx}")
+                return False
 
-        await asyncio.get_running_loop().run_in_executor(None, _send)
-        return True
+        return await asyncio.get_running_loop().run_in_executor(None, _send)
 
     async def accept_friend(self, wx_id: str, ticket: str) -> bool:
         if itchat is None:
             return False
 
         def _accept():
-            itchat.add_friend(userName=wx_id, ticket=ticket)
+            try:
+                itchat.add_friend(userName=wx_id, ticket=ticket)
+                return True
+            except Exception:
+                logger.exception(f"接受好友申请失败: {wx_id}")
+                return False
 
-        await asyncio.get_running_loop().run_in_executor(None, _accept)
-        return True
+        return await asyncio.get_running_loop().run_in_executor(None, _accept)
 
     async def get_contacts(self) -> list[ContactInfo]:
         if not self._logged_in or itchat is None:
             return []
 
         def _fetch():
-            friends = itchat.get_friends(update=True)
-            result = []
-            for f in friends:
-                result.append(
-                    ContactInfo(
-                        wx_id=f.get("UserName", ""),
-                        nickname=f.get("NickName", ""),
-                        remark=f.get("RemarkName", ""),
-                        is_group=False,
-                        avatar=f.get("HeadImgUrl", ""),
+            try:
+                friends = itchat.get_friends(update=True)
+                result = []
+                for f in friends:
+                    result.append(
+                        ContactInfo(
+                            wx_id=f.get("UserName", ""),
+                            nickname=f.get("NickName", ""),
+                            remark=f.get("RemarkName", ""),
+                            is_group=False,
+                            avatar=f.get("HeadImgUrl", ""),
+                        )
                     )
-                )
-            return result
+                return result
+            except Exception:
+                logger.exception("获取联系人失败")
+                return []
 
         return await asyncio.get_running_loop().run_in_executor(None, _fetch)
 
@@ -115,15 +216,20 @@ class ItChatBridge(WeChatBridge):
         return self._logged_in
 
     async def run_forever(self):
-        """阻塞运行（itchat 需要）"""
+        """保持进程运行（login 线程在后台工作）"""
         if itchat is None:
             return
-        while self._logged_in:
+        while not self._stop_event.is_set():
             await asyncio.sleep(1)
 
     # ── 内部回调 ──
 
     def _on_itchat_msg(self, msg, is_group: bool):
+        if not self._loop:
+            return
+        # 跳过自己发的消息
+        if msg.get("FromUserName") == "filehelper":
+            return
         wx_msg = WeChatMessage(
             msg_id=msg.get("MsgId", ""),
             from_wx=msg.get("FromUserName", ""),
@@ -138,9 +244,11 @@ class ItChatBridge(WeChatBridge):
                     self._call_handler(self.on_message, wx_msg), self._loop
                 )
             except Exception:
-                logger.exception("消息处理异常")
+                logger.exception("消息回调异常")
 
     def _on_itchat_friend_request(self, msg):
+        if not self._loop:
+            return
         wx_msg = WeChatMessage(
             msg_id=msg.get("MsgId", ""),
             from_wx=msg.get("UserName", ""),
@@ -155,7 +263,7 @@ class ItChatBridge(WeChatBridge):
                     self._call_handler(self.on_friend_request, wx_msg), self._loop
                 )
             except Exception:
-                logger.exception("好友申请处理异常")
+                logger.exception("好友申请回调异常")
 
     async def _call_handler(self, handler, msg):
         try:

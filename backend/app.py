@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from ai import AIFactory
 from config import settings
 from database import async_session_factory, init_db
 
@@ -20,58 +21,72 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── 全局桥接实例 ──
+
+_bridge_instance = None
+
+
+def get_bridge():
+    """获取当前微信桥接实例（API 路由使用）"""
+    return _bridge_instance
+
+
+def set_bridge(bridge):
+    global _bridge_instance
+    _bridge_instance = bridge
+
+
 # ── 生命周期 ──
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭"""
-    # 启动
     logger.info("初始化数据库...")
     init_db()
-    logger.info(f"服务启动: http://{settings.HOST}:{settings.PORT}")
 
     if settings.WECHAT_AUTO_LOGIN:
         asyncio.create_task(_start_wechat())
 
+    logger.info(f"服务启动: http://{settings.HOST}:{settings.PORT}")
     yield
 
-    # 关闭
-    if hasattr(app.state, "bridge") and app.state.bridge:
-        await app.state.bridge.logout()
+    bridge = get_bridge()
+    if bridge:
+        await bridge.logout()
     logger.info("服务已关闭")
 
 
 async def _start_wechat():
     """后台启动微信桥接"""
     try:
-        from wechat.mock_bridge import MockBridge
+        # 尝试真实桥接，失败则回退模拟
+        bridge = None
+        try:
+            import itchat  # noqa: F401
+
+            from wechat.itchat_bridge import ItChatBridge
+
+            bridge = ItChatBridge()
+            logger.info("使用 itchat-uos 桥接")
+        except ImportError:
+            from wechat.mock_bridge import MockBridge
+
+            bridge = MockBridge()
+            logger.warning("itchat-uos 未安装，使用 MockBridge（模拟模式）")
+
         from wechat.handler import MessageHandler
 
-        bridge = MockBridge()
         MessageHandler(bridge, async_session_factory)
-        await bridge.login()
+        set_bridge(bridge)
 
-        # 挂到 app.state 供 API 查询
-        import fastapi
-        app = fastapi.request.lifespan()
-        # 简单方案：用全局变量
-        _store_bridge(bridge)
-
-        await bridge.run_forever()
+        ok = await bridge.login()
+        if ok:
+            logger.info("微信桥接已启动")
+            await bridge.run_forever()
+        else:
+            logger.error("微信桥接启动失败")
     except Exception:
-        logger.exception("微信桥接启动失败")
-
-
-_bridge_instance = None
-
-
-def _store_bridge(bridge):
-    global _bridge_instance
-    _bridge_instance = bridge
-
-
-def get_bridge():
-    return _bridge_instance
+        logger.exception("微信桥接启动异常")
 
 
 # ── FastAPI ──
@@ -98,10 +113,12 @@ app.add_middleware(
 from api.providers import router as providers_router
 from api.contacts import router as contacts_router
 from api.conversations import router as conversations_router
+from api.wechat import router as wechat_router
 
 app.include_router(providers_router)
 app.include_router(contacts_router)
 app.include_router(conversations_router)
+app.include_router(wechat_router)
 
 
 @app.get("/api/status")
@@ -110,6 +127,10 @@ async def get_status():
     return {
         "status": "running",
         "wechat_logged_in": bridge.is_logged_in() if bridge else False,
+        "wechat_bridge_type": (
+            "itchat" if bridge and hasattr(bridge, "get_qrcode_path") else
+            "mock" if bridge else None
+        ),
     }
 
 
@@ -118,7 +139,11 @@ async def get_status():
 try:
     frontend_dist = settings.PROJECT_ROOT / "frontend" / "dist"
     if frontend_dist.exists():
-        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+        app.mount(
+            "/",
+            StaticFiles(directory=str(frontend_dist), html=True),
+            name="frontend",
+        )
 except Exception:
     pass
 
