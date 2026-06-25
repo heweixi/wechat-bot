@@ -51,10 +51,17 @@ class Settings(BaseSettings):
     CUSTOM_MODEL: str = ""
 
     # ── 微信 ──
-    # 是否在启动时自动登录微信
+    # 桥接类型：wkteam（iPad协议） / mock（模拟）
+    WECHAT_BRIDGE_TYPE: str = "wkteam"
+    # 是否在启动时自动连接
     WECHAT_AUTO_LOGIN: bool = True
     # 自动通过好友申请关键词过滤（逗号分隔，为空则全自动通过）
     WECHAT_AUTO_ACCEPT_KEYWORDS: str = ""
+
+    # ── wkteam (Eyun iPad 协议) ──
+    WKTEAM_API_URL: str = "http://125.122.152.142:9899"
+    WKTEAM_TOKEN: str = ""         # Bearer Token (per account)
+    WKTEAM_WX_ID: str = ""         # 当前登录的微信号 wxid
 
     # ── 自动回复 ──
     # 对私聊消息自动回复（@all = 所有联系人，逗号分隔列表）

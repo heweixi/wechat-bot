@@ -1,95 +1,108 @@
-# API 路由 — 微信桥接状态
+# API 路由 — 微信桥接状态 + wkteam Webhook
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
+import logging
+from fastapi import APIRouter, HTTPException, Request
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
-
-from app import get_bridge
-from wechat.itchat_bridge import ItChatBridge
+from app import get_bridge, start_bridge
+from wechat.wkteam_bridge import WkteamBridge
 from wechat.mock_bridge import MockBridge
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/wechat", tags=["WeChat"])
 
 
-@router.post("/refresh-qrcode")
-async def refresh_qrcode():
-    """强制刷新二维码"""
+# ── Webhook 接收（wkteam 消息回调） ──
+
+@router.post("/webhook")
+async def wechat_webhook(request: Request):
+    """
+    接收 wkteam 的消息推送回调。
+    wkteam 配置 webhook URL 为: http://your-server:8010/api/wechat/webhook
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        # 有些回调可能是 form 格式
+        form = await request.form()
+        payload = dict(form)
+
+    logger.debug(f"[webhook] 收到回调: {payload}")
+
     bridge = get_bridge()
-    if not bridge or not isinstance(bridge, ItChatBridge):
-        raise HTTPException(400, "仅 itchat 桥接支持")
-    bridge.refresh_qrcode()
-    return {"ok": True}
+    if not bridge:
+        logger.warning("[webhook] 桥接未初始化，丢弃消息")
+        return {"code": 200, "msg": "bridge not ready"}
+
+    if isinstance(bridge, WkteamBridge):
+        try:
+            await bridge.handle_webhook(payload)
+        except Exception:
+            logger.exception("[webhook] 处理消息异常")
+    elif isinstance(bridge, MockBridge):
+        # MockBridge 也可以通过 webhook 注入消息（测试用）
+        from_wx = payload.get("fromWxId", "mock_user_1")
+        content = payload.get("content", "") or payload.get("msg", "")
+        if content:
+            await bridge.inject_message(from_wx, content)
+
+    return {"code": 200, "msg": "ok"}
 
 
-@router.post("/login")
-async def manual_login():
-    """手动启动微信桥接"""
-    from app import start_bridge
-
-    ok = await start_bridge()
-    if ok:
-        return {"ok": True, "message": "桥接已启动"}
-    return {"ok": False, "message": "桥接启动失败，请查看后端日志"}
-
+# ── 状态 ──
 
 @router.get("/status")
 async def wechat_status():
-    """微信连接状态 + QR 码信息"""
+    """微信连接状态"""
     bridge = get_bridge()
     if not bridge:
         return {
             "logged_in": False,
             "connected": False,
             "bridge_type": None,
-            "qrcode_available": False,
         }
 
-    info = {
+    bridge_type = "wkteam" if isinstance(bridge, WkteamBridge) else "mock"
+
+    return {
         "logged_in": bridge.is_logged_in(),
         "connected": True,
-        "bridge_type": "itchat" if isinstance(bridge, ItChatBridge) else "mock",
+        "bridge_type": bridge_type,
     }
 
-    # 如果是 itchat 桥接，提供 QR 码信息
-    if isinstance(bridge, ItChatBridge):
-        qr_age = bridge.get_qrcode_age()
-        info["qrcode_available"] = bridge.get_qrcode_path() is not None
-        info["qrcode_age"] = round(qr_age, 1)
-        info["qrcode_expired"] = qr_age > 60  # QR 码 60 秒过期
-    else:
-        info["qrcode_available"] = False
 
-    return info
+# ── 手动启动 ──
+
+@router.post("/login")
+async def manual_login():
+    """手动启动微信桥接"""
+    ok = await start_bridge()
+    if ok:
+        return {"ok": True, "message": "桥接已启动"}
+    return {"ok": False, "message": "桥接启动失败，请查看后端日志"}
 
 
-@router.get("/qrcode")
-async def get_qrcode():
-    """获取微信登录 QR 码图片"""
+# ── 发送消息（手动测试用） ──
+
+@router.post("/send")
+async def send_message(data: dict):
+    """手动发送消息（调试用）"""
     bridge = get_bridge()
-    if not bridge or not isinstance(bridge, ItChatBridge):
-        raise HTTPException(404, "未使用 itchat 桥接")
+    if not bridge:
+        raise HTTPException(400, "桥接未连接")
 
-    path = bridge.get_qrcode_path()
-    if not path:
-        raise HTTPException(404, "QR 码尚未生成，请先尝试登录")
+    to_wx = data.get("to_wx", "")
+    content = data.get("content", "")
+    if not to_wx or not content:
+        raise HTTPException(422, "to_wx 和 content 不能为空")
 
-    return FileResponse(
-        path,
-        media_type="image/png",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    ok = await bridge.send_message(to_wx, content)
+    return {"ok": ok}
 
 
-# ── 模拟桥接调试 API（仅 MockBridge 模式下可用） ──
-
+# ── Mock 调试 ──
 
 @router.post("/mock/send")
 async def mock_send_message(data: dict):
@@ -100,7 +113,6 @@ async def mock_send_message(data: dict):
 
     from_wx = data.get("from_wx", "mock_user_1")
     content = data.get("content", "")
-
     if not content:
         raise HTTPException(422, "content 不能为空")
 

@@ -32,9 +32,6 @@
           <el-button v-if="showStartBtn" type="primary" size="small" :icon="Refresh" @click="startBridge" :loading="starting">
             启动桥接
           </el-button>
-          <el-button v-if="showScan" type="warning" size="small" :icon="Camera" @click="showQr = true">
-            扫码登录
-          </el-button>
           <el-tag :type="statusTagType" size="small" style="margin-left: 8px">
             {{ statusText }}
           </el-tag>
@@ -44,45 +41,21 @@
         <router-view />
       </el-main>
     </el-container>
-
-    <!-- QR 码弹窗 -->
-    <el-dialog v-model="showQr" title="微信扫码登录" width="360px" :close-on-click-modal="false">
-      <div style="text-align: center">
-        <img :src="qrUrl" alt="微信登录二维码"
-          style="width: 280px; height: 280px; border: 1px solid #dcdfe6; border-radius: 8px;"
-          @error="qrError = true" />
-        <p v-if="qrError" style="color: #999">
-          QR 码尚未生成，请等待...
-        </p>
-        <p v-else style="color: #666; margin-top: 12px">
-          请使用微信扫描二维码登录
-        </p>
-        <el-button v-if="qrError" type="primary" @click="refreshQr" :icon="Refresh" style="margin-top: 8px">
-          刷新二维码
-        </el-button>
-      </div>
-    </el-dialog>
   </el-container>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { Camera, Refresh } from '@element-plus/icons-vue'
-import { wechatApi } from './api'
+import { Refresh } from '@element-plus/icons-vue'
+import { wechatApi, type WeChatStatus } from './api'
 
 const route = useRoute()
-const showQr = ref(false)
-const qrError = ref(false)
-const wechatStatus = ref({ logged_in: false, qrcode_available: false, bridge_type: 'mock' })
+const wechatStatus = ref<WeChatStatus>({ logged_in: false, connected: false, bridge_type: null })
 let pollTimer: any = null
 
-const showScan = computed(() =>
-  !wechatStatus.value.logged_in && wechatStatus.value.bridge_type === 'itchat'
-)
-
 const showStartBtn = computed(() =>
-  !wechatStatus.value.bridge_type && !wechatStatus.value.logged_in
+  !wechatStatus.value.connected && !wechatStatus.value.logged_in
 )
 
 const starting = ref(false)
@@ -91,7 +64,6 @@ async function startBridge() {
   starting.value = true
   try {
     await wechatApi.login()
-    // 等几秒让桥接初始化
     setTimeout(pollStatus, 3000)
   } catch { /* ignore */ }
   finally { starting.value = false }
@@ -99,43 +71,30 @@ async function startBridge() {
 
 const statusTagType = computed(() => {
   if (starting.value) return 'warning'
-  if (!wechatStatus.value.bridge_type) return 'info'
+  if (!wechatStatus.value.connected) return 'info'
   if (wechatStatus.value.logged_in) return 'success'
   return 'warning'
 })
 
 const statusText = computed(() => {
   if (starting.value) return '启动中...'
-  if (!wechatStatus.value.bridge_type) return '未连接'
-  if (wechatStatus.value.logged_in) return '微信已连接'
-  return wechatStatus.value.bridge_type === 'itchat' ? '等待扫码' : '模拟模式'
+  if (!wechatStatus.value.connected) return '未连接'
+  if (wechatStatus.value.logged_in) {
+    const t = wechatStatus.value.bridge_type
+    return t === 'wkteam' ? '微信已连接 (iPad)' : t === 'mock' ? '模拟模式' : '已连接'
+  }
+  return '等待连接...'
 })
-
-const qrUrl = computed(() => wechatApi.qrcodeUrl())
 
 async function pollStatus() {
   try {
-    const res = await wechatApi.status()
-    wechatStatus.value = res
-    // 登录成功后关闭 QR 弹窗
-    if (res.logged_in && showQr.value) {
-      showQr.value = false
-    }
+    wechatStatus.value = await wechatApi.status()
   } catch { /* ignore */ }
-}
-
-function refreshQr() {
-  qrError.value = false
-  wechatApi.refreshQrcode().catch(() => {})
-  wechatStatus.value.qrcode_available = false
-  setTimeout(() => {
-    wechatStatus.value.qrcode_available = true
-  }, 2000)
 }
 
 onMounted(() => {
   pollStatus()
-  pollTimer = setInterval(pollStatus, 3000)
+  pollTimer = setInterval(pollStatus, 5000)
 })
 
 onUnmounted(() => {

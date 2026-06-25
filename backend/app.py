@@ -121,20 +121,16 @@ async def lifespan(app: FastAPI):
 async def _start_wechat():
     """后台启动微信桥接"""
     try:
-        # 尝试真实桥接，失败则回退模拟
         bridge = None
-        try:
-            import itchat  # noqa: F401
 
-            from wechat.itchat_bridge import ItChatBridge
-
-            bridge = ItChatBridge()
-            logger.info("使用 itchat-uos 桥接")
-        except ImportError:
+        if settings.WECHAT_BRIDGE_TYPE == "wkteam":
+            from wechat.wkteam_bridge import WkteamBridge
+            bridge = WkteamBridge()
+            logger.info("使用 wkteam iPad 协议桥接")
+        else:
             from wechat.mock_bridge import MockBridge
-
             bridge = MockBridge()
-            logger.warning("itchat-uos 未安装，使用 MockBridge（模拟模式）")
+            logger.info("使用 MockBridge（模拟模式）")
 
         from wechat.handler import MessageHandler
 
@@ -186,11 +182,12 @@ app.include_router(wechat_router)
 @app.get("/api/status")
 async def get_status():
     bridge = get_bridge()
+    from wechat.wkteam_bridge import WkteamBridge
     return {
         "status": "running",
         "wechat_logged_in": bridge.is_logged_in() if bridge else False,
         "wechat_bridge_type": (
-            "itchat" if bridge and hasattr(bridge, "get_qrcode_path") else
+            "wkteam" if bridge and isinstance(bridge, WkteamBridge) else
             "mock" if bridge else None
         ),
         "connected": bridge is not None,

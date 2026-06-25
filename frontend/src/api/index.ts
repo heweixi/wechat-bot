@@ -62,10 +62,7 @@ export interface MessageItem {
 export interface WeChatStatus {
   logged_in: boolean
   connected: boolean
-  bridge_type: 'itchat' | 'mock' | null
-  qrcode_available: boolean
-  qrcode_age?: number
-  qrcode_expired?: boolean
+  bridge_type: 'wkteam' | 'mock' | null
 }
 
 // ── AI Providers ──
@@ -103,6 +100,6 @@ export const conversationApi = {
 export const wechatApi = {
   status: (): Promise<WeChatStatus> => http.get('/wechat/status').then(r => r.data),
   login: (): Promise<{ ok: boolean; message: string }> => http.post('/wechat/login').then(r => r.data),
-  refreshQrcode: (): Promise<{ ok: boolean }> => http.post('/wechat/refresh-qrcode').then(r => r.data),
-  qrcodeUrl: (): string => `/api/wechat/qrcode?t=${Date.now()}`,
+  send: (to_wx: string, content: string): Promise<{ ok: boolean }> =>
+    http.post('/wechat/send', { to_wx, content }).then(r => r.data),
 }
