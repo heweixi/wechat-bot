@@ -17,6 +17,12 @@
       </el-table-column>
       <el-table-column prop="model" label="模型" width="180" />
       <el-table-column prop="base_url" label="API 地址" min-width="200" show-overflow-tooltip />
+      <el-table-column label="API Key" width="80">
+        <template #default="{ row }">
+          <el-tag v-if="row.has_key" type="success" size="small">已配置</el-tag>
+          <el-tag v-else type="danger" size="small">未配置</el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="默认" width="70">
         <template #default="{ row }">
           <el-tag v-if="row.is_default" type="success" size="small">默认</el-tag>
@@ -87,13 +93,13 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
-import { providerApi } from '../api'
+import { providerApi, type AIProvider } from '../api'
 
 const loading = ref(false)
 const saving = ref(false)
 const showDialog = ref(false)
 const editing = ref(false)
-const providers = ref<any[]>([])
+const providers = ref<AIProvider[]>([])
 
 const emptyForm = () => ({
   name: '',
@@ -107,7 +113,7 @@ const emptyForm = () => ({
   is_default: false,
 })
 
-const form = reactive(emptyForm())
+const form: any = reactive(emptyForm())
 
 onMounted(() => loadProviders())
 
@@ -120,19 +126,28 @@ async function loadProviders() {
   }
 }
 
-function editProvider(row: any) {
+function editProvider(row: AIProvider) {
   editing.value = true
-  Object.assign(form, { ...row })
+  // 不复制 api_key（API 不再返回）
+  Object.assign(form, {
+    ...row,
+    api_key: '', // 编辑时 API Key 留空，用户可选填入新值
+  })
   showDialog.value = true
 }
 
 async function saveProvider() {
   saving.value = true
   try {
+    const data: any = { ...form }
+    // 编辑时如果 api_key 为空，不覆盖已有值
+    if (editing.value && !data.api_key) {
+      delete data.api_key
+    }
     if (editing.value) {
-      await providerApi.update(form.id, form)
+      await providerApi.update(form.id, data)
     } else {
-      await providerApi.create({ ...form })
+      await providerApi.create(data)
     }
     showDialog.value = false
     loadProviders()
@@ -146,7 +161,7 @@ async function deleteProvider(id: string) {
   loadProviders()
 }
 
-async function toggleEnabled(row: any, v: boolean) {
+async function toggleEnabled(row: AIProvider, v: boolean) {
   await providerApi.update(row.id, { enabled: v })
   row.enabled = v
 }

@@ -13,7 +13,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      - "8010:8000"
     volumes:
       # 持久化数据库和日志
       - wechat_data:/app/data
@@ -21,8 +21,9 @@ services:
       - ./.env:/app/.env:ro
     env_file:
       - .env
-    environment:
-      - DATABASE_URL=sqlite+aiosqlite:///app/data/wechat_bot.db
+    dns:
+      - 223.5.5.5
+      - 114.114.114.114
     restart: unless-stopped
     networks:
       - wechat_net
@@ -33,7 +34,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:80"
+      - "3010:80"
     depends_on:
       - backend
     restart: unless-stopped

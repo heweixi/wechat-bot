@@ -53,6 +53,8 @@ class ConversationResponse(BaseModel):
 async def list_conversations(
     contact_id: str | None = Query(None, description="按联系人过滤"),
     search: str | None = Query(None, description="按内容关键词搜索"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页条数"),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Conversation).order_by(Conversation.updated_at.desc())
@@ -62,7 +64,6 @@ async def list_conversations(
 
     if search:
         keyword = f"%{search}%"
-        # 子查询：找到包含关键词的消息所属的会话 ID
         subq = (
             select(Message.conversation_id)
             .where(Message.content.ilike(keyword))
@@ -71,18 +72,29 @@ async def list_conversations(
         )
         stmt = stmt.where(Conversation.id.in_(select(subq.c.conversation_id)))
 
+    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(stmt)
     convs = list(result.scalars().all())
 
+    # 批量查会话消息（N+1 → 1+1）
+    if convs:
+        conv_ids = [c.id for c in convs]
+        msg_stmt = (
+            select(Message)
+            .where(Message.conversation_id.in_(conv_ids))
+            .order_by(Message.created_at.asc())
+        )
+        msg_result = await db.execute(msg_stmt)
+        all_msgs = list(msg_result.scalars().all())
+        msgs_by_conv: dict[str, list[Message]] = {}
+        for m in all_msgs:
+            msgs_by_conv.setdefault(m.conversation_id, []).append(m)
+    else:
+        msgs_by_conv = {}
+
     resp = []
     for conv in convs:
-        msg_result = await db.execute(
-            select(Message)
-            .where(Message.conversation_id == conv.id)
-            .order_by(Message.created_at.asc())
-            .limit(5)  # 仅返回最近 5 条预览
-        )
-        messages = list(msg_result.scalars().all())
+        messages = msgs_by_conv.get(conv.id, [])[-5:]  # 仅取最近 5 条
         resp.append(
             ConversationResponse(
                 **conv.__dict__,

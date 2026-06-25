@@ -15,16 +15,43 @@ from wechat.mock_bridge import MockBridge
 router = APIRouter(prefix="/api/wechat", tags=["WeChat"])
 
 
+@router.post("/refresh-qrcode")
+async def refresh_qrcode():
+    """强制刷新二维码"""
+    bridge = get_bridge()
+    if not bridge or not isinstance(bridge, ItChatBridge):
+        raise HTTPException(400, "仅 itchat 桥接支持")
+    bridge.refresh_qrcode()
+    return {"ok": True}
+
+
+@router.post("/login")
+async def manual_login():
+    """手动启动微信桥接"""
+    from app import start_bridge
+
+    ok = await start_bridge()
+    if ok:
+        return {"ok": True, "message": "桥接已启动"}
+    return {"ok": False, "message": "桥接启动失败，请查看后端日志"}
+
+
 @router.get("/status")
 async def wechat_status():
     """微信连接状态 + QR 码信息"""
     bridge = get_bridge()
     if not bridge:
-        return {"logged_in": False, "connected": False}
+        return {
+            "logged_in": False,
+            "connected": False,
+            "bridge_type": None,
+            "qrcode_available": False,
+        }
 
     info = {
         "logged_in": bridge.is_logged_in(),
         "connected": True,
+        "bridge_type": "itchat" if isinstance(bridge, ItChatBridge) else "mock",
     }
 
     # 如果是 itchat 桥接，提供 QR 码信息

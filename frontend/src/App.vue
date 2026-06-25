@@ -29,7 +29,10 @@
       <el-header style="background: #fff; border-bottom: 1px solid #dcdfe6; display: flex; align-items: center; justify-content: space-between">
         <h2 style="margin: 0; font-size: 16px">{{ route.meta.title || '微信机器人' }}</h2>
         <div>
-          <el-button v-if="showScan" type="warning" size="small" :icon="ScanCode" @click="showQr = true">
+          <el-button v-if="showStartBtn" type="primary" size="small" :icon="Refresh" @click="startBridge" :loading="starting">
+            启动桥接
+          </el-button>
+          <el-button v-if="showScan" type="warning" size="small" :icon="Camera" @click="showQr = true">
             扫码登录
           </el-button>
           <el-tag :type="statusTagType" size="small" style="margin-left: 8px">
@@ -65,7 +68,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { ScanCode, Refresh } from '@element-plus/icons-vue'
+import { Camera, Refresh } from '@element-plus/icons-vue'
 import { wechatApi } from './api'
 
 const route = useRoute()
@@ -78,13 +81,31 @@ const showScan = computed(() =>
   !wechatStatus.value.logged_in && wechatStatus.value.bridge_type === 'itchat'
 )
 
+const showStartBtn = computed(() =>
+  !wechatStatus.value.bridge_type && !wechatStatus.value.logged_in
+)
+
+const starting = ref(false)
+
+async function startBridge() {
+  starting.value = true
+  try {
+    await wechatApi.login()
+    // 等几秒让桥接初始化
+    setTimeout(pollStatus, 3000)
+  } catch { /* ignore */ }
+  finally { starting.value = false }
+}
+
 const statusTagType = computed(() => {
+  if (starting.value) return 'warning'
   if (!wechatStatus.value.bridge_type) return 'info'
   if (wechatStatus.value.logged_in) return 'success'
   return 'warning'
 })
 
 const statusText = computed(() => {
+  if (starting.value) return '启动中...'
   if (!wechatStatus.value.bridge_type) return '未连接'
   if (wechatStatus.value.logged_in) return '微信已连接'
   return wechatStatus.value.bridge_type === 'itchat' ? '等待扫码' : '模拟模式'
@@ -105,11 +126,11 @@ async function pollStatus() {
 
 function refreshQr() {
   qrError.value = false
-  // 强制刷新
+  wechatApi.refreshQrcode().catch(() => {})
   wechatStatus.value.qrcode_available = false
   setTimeout(() => {
     wechatStatus.value.qrcode_available = true
-  }, 500)
+  }, 2000)
 }
 
 onMounted(() => {

@@ -170,7 +170,7 @@ class MessageHandler:
             return conv
 
         # 创建新会话
-        ai_name = contact.ai_provider.nickname if contact.ai_provider else "default"
+        ai_name = contact.ai_provider.name if contact.ai_provider else "default"
         conv = Conversation(
             contact_id=contact.id,
             title=f"会话 {today}",

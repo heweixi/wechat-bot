@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/contacts", tags=["Contacts"])
 
 # ── Schema ──
 
-class ContactResponse(BaseModel):
+class ContactPublic(BaseModel):
     id: str
     wx_id: str
     nickname: str
@@ -38,10 +38,12 @@ class ContactResponse(BaseModel):
 
 # ── API ──
 
-@router.get("", response_model=list[ContactResponse])
+@router.get("", response_model=list[ContactPublic])
 async def list_contacts(
     search: str = Query("", description="搜索昵称/备注/微信ID"),
     group_only: bool = Query(False, description="仅群聊"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页条数"),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Contact)
@@ -57,21 +59,29 @@ async def list_contacts(
     if group_only:
         stmt = stmt.where(Contact.is_group == True)  # noqa: E712
 
-    stmt = stmt.order_by(Contact.updated_at.desc())
-    result = await db.execute(stmt)
-    contacts = list(result.scalars().all())
-
-    # 统计每个联系人的会话数
-    resp = []
-    for c in contacts:
-        count_result = await db.execute(
-            select(func.count(Conversation.id)).where(
-                Conversation.contact_id == c.id
-            )
+    # 批量查会话数（一次查询替代 N+1）
+    count_subq = (
+        select(
+            Conversation.contact_id,
+            func.count(Conversation.id).label("conv_count"),
         )
-        conv_count = count_result.scalar() or 0
+        .group_by(Conversation.contact_id)
+        .subquery()
+    )
+
+    stmt = stmt.outerjoin(count_subq, Contact.id == count_subq.c.contact_id).add_columns(
+        func.coalesce(count_subq.c.conv_count, 0).label("conversation_count")
+    )
+    stmt = stmt.order_by(Contact.updated_at.desc())
+    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    resp = []
+    for c, conv_count in rows:
         resp.append(
-            ContactResponse(
+            ContactPublic(
                 **c.__dict__,
                 conversation_count=conv_count,
                 tags=c.tags or [],
@@ -80,7 +90,7 @@ async def list_contacts(
     return resp
 
 
-@router.get("/{contact_id}", response_model=ContactResponse)
+@router.get("/{contact_id}", response_model=ContactPublic)
 async def get_contact(contact_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Contact).where(Contact.id == contact_id)
@@ -93,7 +103,7 @@ async def get_contact(contact_id: str, db: AsyncSession = Depends(get_db)):
         select(func.count(Conversation.id)).where(Conversation.contact_id == c.id)
     )
     conv_count = count_result.scalar() or 0
-    return ContactResponse(**c.__dict__, conversation_count=conv_count, tags=c.tags or [])
+    return ContactPublic(**c.__dict__, conversation_count=conv_count, tags=c.tags or [])
 
 
 @router.put("/{contact_id}/ai")
